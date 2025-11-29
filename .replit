@@ -22,9 +22,18 @@ args = "Polymarket Strategy Analyzer"
 name = "Polymarket Strategy Analyzer"
 author = "agent"
 
+[workflows.workflow.metadata]
+outputType = "webview"
+
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "node index.js"
+args = "node server.js"
+waitForPort = 5000
 
-[workflows.workflow.metadata]
-outputType = "console"
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 39125
+externalPort = 3000
