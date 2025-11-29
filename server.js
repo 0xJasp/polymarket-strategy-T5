@@ -10,6 +10,41 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 let lastResults = null;
 let isRunning = false;
 let lastRunTime = null;
+let polymarketStats = null;
+
+async function getPolymarketStats() {
+    try {
+        const marketsUrl = 'https://gamma-api.polymarket.com/markets?limit=1000&active=true';
+        const response = await fetch(marketsUrl, {
+            headers: { 'Accept': 'application/json' }
+        });
+        
+        if (!response.ok) {
+            return null;
+        }
+        
+        const markets = await response.json();
+        
+        let totalVolume = 0;
+        let totalLiquidity = 0;
+        let activeMarketsCount = 0;
+        
+        for (const market of markets) {
+            if (market.volumeNum) totalVolume += market.volumeNum;
+            if (market.liquidityNum) totalLiquidity += market.liquidityNum;
+            if (market.active) activeMarketsCount++;
+        }
+        
+        return {
+            totalVolume: totalVolume,
+            totalLiquidity: totalLiquidity,
+            activeMarkets: activeMarketsCount,
+            totalMarkets: markets.length
+        };
+    } catch (error) {
+        return null;
+    }
+}
 
 async function getRecentActiveTraders() {
     const marketsUrl = 'https://gamma-api.polymarket.com/markets?limit=20&active=true&closed=false';
@@ -68,7 +103,7 @@ async function calculateWeeklyProfit(walletAddress) {
         });
         
         if (!response.ok) {
-            return { profit: 0, trades: [], tradeCount: 0 };
+            return { profit: 0, trades: [], tradeCount: 0, topTrades: [] };
         }
         
         const data = await response.json();
@@ -104,13 +139,18 @@ async function calculateWeeklyProfit(walletAddress) {
             });
         }
         
+        const topTrades = cleanTrades
+            .sort((a, b) => b.value - a.value)
+            .slice(0, 3);
+        
         return {
             profit: totalProfit,
             trades: cleanTrades,
-            tradeCount: recentTrades.length
+            tradeCount: recentTrades.length,
+            topTrades: topTrades
         };
     } catch (error) {
-        return { profit: 0, trades: [], tradeCount: 0 };
+        return { profit: 0, trades: [], tradeCount: 0, topTrades: [] };
     }
 }
 
@@ -166,14 +206,15 @@ async function runAnalysis() {
         const tradersWithProfits = [];
         
         for (const trader of activeTraders) {
-            const { profit, trades, tradeCount } = await calculateWeeklyProfit(trader.walletAddress);
+            const { profit, trades, tradeCount, topTrades } = await calculateWeeklyProfit(trader.walletAddress);
             
             if (tradeCount > 0) {
                 tradersWithProfits.push({
                     ...trader,
                     weeklyProfit: profit,
                     trades: trades,
-                    tradeCount: tradeCount
+                    tradeCount: tradeCount,
+                    topTrades: topTrades
                 });
             }
         }
@@ -192,6 +233,7 @@ async function runAnalysis() {
                 walletAddress: trader.walletAddress,
                 weeklyProfit: trader.weeklyProfit,
                 tradeCount: trader.tradeCount,
+                topTrades: trader.topTrades,
                 strategy: strategy
             });
         }
@@ -223,7 +265,7 @@ const htmlTemplate = `
             color: #e4e4e4;
             padding: 20px;
         }
-        .container { max-width: 900px; margin: 0 auto; }
+        .container { max-width: 1000px; margin: 0 auto; }
         header {
             text-align: center;
             padding: 40px 20px;
@@ -239,6 +281,26 @@ const htmlTemplate = `
             margin-bottom: 10px;
         }
         .subtitle { color: #888; font-size: 1.1em; }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 30px;
+        }
+        .stat-card {
+            background: rgba(0, 217, 255, 0.1);
+            border: 1px solid rgba(0, 217, 255, 0.3);
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .stat-label { color: #888; font-size: 0.9em; text-transform: uppercase; }
+        .stat-value {
+            font-size: 1.6em;
+            font-weight: bold;
+            color: #00ff88;
+            margin-top: 8px;
+        }
         .controls {
             display: flex;
             gap: 15px;
@@ -321,6 +383,39 @@ const htmlTemplate = `
             word-break: break-all;
         }
         .trades-count { color: #888; margin-top: 5px; }
+        .top-trades {
+            background: rgba(0, 255, 136, 0.05);
+            border: 1px solid rgba(0, 255, 136, 0.3);
+            padding: 12px;
+            border-radius: 6px;
+            margin: 15px 0;
+        }
+        .top-trades-title {
+            font-weight: 600;
+            color: #00ff88;
+            margin-bottom: 10px;
+            font-size: 0.9em;
+        }
+        .trade-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            font-size: 0.9em;
+        }
+        .trade-item:last-child { border-bottom: none; }
+        .trade-market { color: #e4e4e4; flex: 1; }
+        .trade-action {
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.8em;
+            font-weight: 600;
+            margin: 0 10px;
+        }
+        .trade-action.buy { background: rgba(0, 217, 255, 0.3); color: #00d9ff; }
+        .trade-action.sell { background: rgba(0, 255, 136, 0.3); color: #00ff88; }
+        .trade-value { color: #888; text-align: right; min-width: 80px; }
         .strategy {
             background: rgba(0,0,0,0.2);
             padding: 15px;
@@ -332,11 +427,6 @@ const htmlTemplate = `
             color: #00d9ff;
             margin-bottom: 8px;
         }
-        .no-results {
-            text-align: center;
-            padding: 40px;
-            color: #888;
-        }
     </style>
 </head>
 <body>
@@ -344,6 +434,20 @@ const htmlTemplate = `
         <header>
             <h1>Polymarket Strategy Analyzer</h1>
             <p class="subtitle">AI-powered analysis of top weekly profit traders</p>
+            <div class="stats-grid" id="statsGrid">
+                <div class="stat-card">
+                    <div class="stat-label">Total Volume</div>
+                    <div class="stat-value" id="statVolume">Loading...</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Total Liquidity</div>
+                    <div class="stat-value" id="statLiquidity">Loading...</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Active Markets</div>
+                    <div class="stat-value" id="statMarkets">Loading...</div>
+                </div>
+            </div>
         </header>
         
         <div class="controls">
@@ -405,31 +509,70 @@ const htmlTemplate = `
             }
         }
         
+        function formatCurrency(value) {
+            if (value >= 1000000) return '$' + (value / 1000000).toFixed(1) + 'M';
+            if (value >= 1000) return '$' + (value / 1000).toFixed(1) + 'K';
+            return '$' + value.toFixed(2);
+        }
+        
         function renderResults(traders) {
             const container = document.getElementById('results');
-            container.innerHTML = traders.map(trader => \`
-                <div class="trader-card">
-                    <div class="trader-header">
-                        <span class="rank">#\${trader.rank}</span>
-                        <span class="profit \${trader.weeklyProfit < 0 ? 'negative' : ''}">
-                            \${trader.weeklyProfit >= 0 ? '+' : ''}\$\${trader.weeklyProfit.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-                        </span>
+            container.innerHTML = traders.map(trader => {
+                const topTradesHtml = trader.topTrades && trader.topTrades.length > 0 ? \`
+                    <div class="top-trades">
+                        <div class="top-trades-title">Top 3 Trades (7 days)</div>
+                        \${trader.topTrades.map(trade => \`
+                            <div class="trade-item">
+                                <div class="trade-market">\${trade.market}</div>
+                                <span class="trade-action \${trade.action.toLowerCase()}">
+                                    \${trade.action}
+                                </span>
+                                <div class="trade-value">\${formatCurrency(trade.value)}</div>
+                            </div>
+                        \`).join('')}
                     </div>
-                    <div class="trader-info">
-                        <div class="trader-name">\${trader.name}</div>
-                        <div class="wallet">\${trader.walletAddress}</div>
-                        <div class="trades-count">\${trader.tradeCount} trades in last 7 days</div>
+                \` : '';
+                
+                return \`
+                    <div class="trader-card">
+                        <div class="trader-header">
+                            <span class="rank">#\${trader.rank}</span>
+                            <span class="profit \${trader.weeklyProfit < 0 ? 'negative' : ''}">
+                                \${trader.weeklyProfit >= 0 ? '+' : ''}\$\${trader.weeklyProfit.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                            </span>
+                        </div>
+                        <div class="trader-info">
+                            <div class="trader-name">\${trader.name}</div>
+                            <div class="wallet">\${trader.walletAddress}</div>
+                            <div class="trades-count">\${trader.tradeCount} trades in last 7 days</div>
+                        </div>
+                        \${topTradesHtml}
+                        <div class="strategy">
+                            <div class="strategy-label">AI Strategy Analysis</div>
+                            <p>\${trader.strategy}</p>
+                        </div>
                     </div>
-                    <div class="strategy">
-                        <div class="strategy-label">AI Strategy Analysis</div>
-                        <p>\${trader.strategy}</p>
-                    </div>
-                </div>
-            \`).join('');
+                \`;
+            }).join('');
             container.classList.add('active');
         }
         
-        // Load last results on page load
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/stats');
+                const stats = await response.json();
+                if (stats) {
+                    document.getElementById('statVolume').textContent = formatCurrency(stats.totalVolume);
+                    document.getElementById('statLiquidity').textContent = formatCurrency(stats.totalLiquidity);
+                    document.getElementById('statMarkets').textContent = stats.activeMarkets + ' / ' + stats.totalMarkets;
+                }
+            } catch (err) {
+                console.error('Failed to load stats:', err);
+            }
+        }
+        
+        // Load stats and results on page load
+        loadStats();
         fetch('/api/results')
             .then(r => r.json())
             .then(data => {
@@ -463,6 +606,13 @@ app.get('/api/results', (req, res) => {
     });
 });
 
+app.get('/api/stats', async (req, res) => {
+    if (!polymarketStats) {
+        polymarketStats = await getPolymarketStats();
+    }
+    res.json(polymarketStats);
+});
+
 app.get('/api/status', (req, res) => {
     res.json({
         isRunning: isRunning,
@@ -473,4 +623,7 @@ app.get('/api/status', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Polymarket Strategy Analyzer running at http://0.0.0.0:${PORT}`);
+    getPolymarketStats().then(stats => {
+        polymarketStats = stats;
+    });
 });
