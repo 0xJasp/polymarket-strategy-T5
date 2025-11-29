@@ -432,7 +432,7 @@ const htmlTemplate = `
 <body>
     <div class="container">
         <header>
-            <h1>Polymarket Strategy Analyzer</h1>
+            <h1>Cho Dee - Ultimate AI Polymarket Strategies</h1>
             <p class="subtitle">AI-powered analysis of top weekly profit traders</p>
             <div class="stats-grid" id="statsGrid">
                 <div class="stat-card">
