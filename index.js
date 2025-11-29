@@ -1,32 +1,75 @@
-const fetch = require('node-fetch');
-const { GoogleGenAI } = require('@google/genai');
+import fetch from 'node-fetch';
+import { GoogleGenAI } from '@google/genai';
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
 async function getTopFiveWallets() {
-    const url = 'https://clob.polymarket.com/v1/user/rankings?sort=pnl&timeframe=7d&limit=5';
-    
-    const headers = {
-        'Accept': 'application/json'
-    };
-    
-    if (process.env.POLYLAPIS_API_KEY) {
-        headers['Authorization'] = `Bearer ${process.env.POLYLAPIS_API_KEY}`;
-    }
-    
     try {
-        const response = await fetch(url, { headers });
+        const marketsUrl = 'https://gamma-api.polymarket.com/markets?limit=10&active=true&closed=false';
+        const marketsResponse = await fetch(marketsUrl, {
+            headers: { 'Accept': 'application/json' }
+        });
         
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
+        if (!marketsResponse.ok) {
+            throw new Error(`Markets HTTP error! status: ${marketsResponse.status}`);
         }
         
-        const data = await response.json();
+        const markets = await marketsResponse.json();
         
-        const wallets = data.map(user => ({
-            walletAddress: user.userAddress || user.wallet || user.address,
-            profit: user.pnl || user.profit || user.weeklyPnl
-        }));
+        if (!Array.isArray(markets) || markets.length === 0) {
+            throw new Error('No active markets found');
+        }
+        
+        const sortedMarkets = markets
+            .filter(m => m.volumeNum && m.volumeNum > 0)
+            .sort((a, b) => (b.volumeNum || 0) - (a.volumeNum || 0));
+        
+        const topMarket = sortedMarkets[0];
+        
+        if (!topMarket || !topMarket.conditionId) {
+            throw new Error('No valid market found');
+        }
+        
+        console.log(`Using top market: ${topMarket.question || topMarket.slug}`);
+        console.log(`Market volume: $${topMarket.volumeNum?.toLocaleString()}`);
+        console.log();
+        
+        const holdersUrl = `https://data-api.polymarket.com/holders?market=${topMarket.conditionId}&limit=5`;
+        const holdersResponse = await fetch(holdersUrl, {
+            headers: { 'Accept': 'application/json' }
+        });
+        
+        if (!holdersResponse.ok) {
+            throw new Error(`Holders HTTP error! status: ${holdersResponse.status}`);
+        }
+        
+        const holdersData = await holdersResponse.json();
+        
+        let allHolders = [];
+        if (Array.isArray(holdersData)) {
+            for (const tokenData of holdersData) {
+                if (tokenData.holders && Array.isArray(tokenData.holders)) {
+                    allHolders = allHolders.concat(tokenData.holders);
+                }
+            }
+        }
+        
+        const uniqueWallets = new Map();
+        for (const holder of allHolders) {
+            const wallet = holder.proxyWallet;
+            if (wallet && !uniqueWallets.has(wallet)) {
+                uniqueWallets.set(wallet, {
+                    walletAddress: wallet,
+                    name: holder.name || holder.pseudonym || 'Anonymous',
+                    profit: holder.amount || 0
+                });
+            }
+        }
+        
+        const wallets = Array.from(uniqueWallets.values())
+            .sort((a, b) => b.profit - a.profit)
+            .slice(0, 5)
+            .map((w, index) => ({ ...w, rank: index + 1 }));
         
         return wallets;
     } catch (error) {
@@ -36,16 +79,12 @@ async function getTopFiveWallets() {
 }
 
 async function getRawTrades(walletAddress) {
-    const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
-    const url = `https://clob.polymarket.com/v1/trades?maker_address=${walletAddress}`;
+    const sevenDaysAgo = Math.floor((Date.now() - (7 * 24 * 60 * 60 * 1000)) / 1000);
+    const url = `https://data-api.polymarket.com/trades?user=${walletAddress}&limit=100`;
     
     const headers = {
         'Accept': 'application/json'
     };
-    
-    if (process.env.POLYLAPIS_API_KEY) {
-        headers['Authorization'] = `Bearer ${process.env.POLYLAPIS_API_KEY}`;
-    }
     
     try {
         const response = await fetch(url, { headers });
@@ -59,14 +98,15 @@ async function getRawTrades(walletAddress) {
         
         const cleanTrades = trades
             .filter(trade => {
-                const tradeTime = new Date(trade.timestamp || trade.createdAt || trade.created_at).getTime();
+                const tradeTime = trade.timestamp || 0;
                 return tradeTime >= sevenDaysAgo;
             })
             .map(trade => ({
-                market: trade.market || trade.marketSlug || trade.condition_id || 'Unknown Market',
-                action: trade.side || trade.type || trade.action || 'Unknown',
+                market: trade.title || trade.slug || trade.conditionId || 'Unknown Market',
+                action: trade.side || 'Unknown',
                 price: parseFloat(trade.price) || 0,
-                timestamp: trade.timestamp || trade.createdAt || trade.created_at
+                size: parseFloat(trade.size) || 0,
+                timestamp: trade.timestamp
             }));
         
         return cleanTrades;
@@ -99,7 +139,7 @@ Return ONLY the strategy explanation paragraph, nothing else.`;
     try {
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
-            contents: prompt
+            contents: [{ role: 'user', parts: [{ text: prompt }] }]
         });
         
         return response.text || 'Unable to generate strategy explanation.';
@@ -115,7 +155,7 @@ async function main() {
     console.log('='.repeat(60));
     console.log();
     
-    console.log('Fetching top 5 weekly profit wallets...\n');
+    console.log('Finding top holders from high-volume markets...\n');
     const topWallets = await getTopFiveWallets();
     
     if (topWallets.length === 0) {
@@ -123,12 +163,15 @@ async function main() {
         return;
     }
     
+    console.log(`Found ${topWallets.length} top holders to analyze.\n`);
+    
     for (let i = 0; i < topWallets.length; i++) {
         const wallet = topWallets[i];
         console.log('-'.repeat(60));
-        console.log(`WALLET #${i + 1}`);
+        console.log(`WALLET #${wallet.rank}`);
+        console.log(`Name: ${wallet.name || 'Anonymous'}`);
         console.log(`Address: ${wallet.walletAddress}`);
-        console.log(`Weekly Profit: $${typeof wallet.profit === 'number' ? wallet.profit.toLocaleString() : wallet.profit}`);
+        console.log(`Position Size: $${typeof wallet.profit === 'number' ? wallet.profit.toLocaleString() : wallet.profit}`);
         console.log();
         
         console.log('Fetching trade history...');
